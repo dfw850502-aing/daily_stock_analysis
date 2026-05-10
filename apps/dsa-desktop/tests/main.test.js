@@ -2,10 +2,13 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
-function loadMainModule(t) {
+function loadMainModule(t, options = {}) {
   const originalLoad = Module._load;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   const fakeApp = {
     isPackaged: false,
     getVersion: () => '3.12.0',
@@ -13,6 +16,7 @@ function loadMainModule(t) {
     whenReady: () => ({ then: () => undefined }),
     on: () => undefined,
     quit: () => undefined,
+    ...(options.app || {}),
   };
   const fakeDialog = {
     showMessageBox: async () => ({ response: 0 }),
@@ -51,8 +55,15 @@ function loadMainModule(t) {
 
   t.after(() => {
     Module._load = originalLoad;
+    if (options.platform && originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform);
+    }
     delete require.cache[mainPath];
   });
+
+  if (options.platform) {
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: options.platform });
+  }
 
   return require('../main.js');
 }
@@ -218,6 +229,57 @@ test('desktop update backup list includes WAL and SHM artifacts', (t) => {
   assert.ok(files.includes(path.join('data', 'stock_analysis.db-wal')));
   assert.ok(files.includes(path.join('data', 'stock_analysis.db-shm')));
   assert.ok(files.includes(path.join('logs', 'desktop.log')));
+});
+
+test('restorePackagedRuntimeStateFromBackup skips failed copies and clears backup', (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsa-desktop-restore-'));
+  const appDir = path.join(tempRoot, 'app');
+  const userDataDir = path.join(tempRoot, 'userData');
+  const backupRoot = path.join(userDataDir, '.dsa-desktop-update-backup');
+  const backupDbPath = path.join(backupRoot, 'data', 'stock_analysis.db');
+  fs.mkdirSync(path.dirname(backupDbPath), { recursive: true });
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.writeFileSync(path.join(appDir, 'Uninstall Daily Stock Analysis.exe'), '');
+  fs.writeFileSync(backupDbPath, 'backup-db');
+  fs.writeFileSync(
+    path.join(backupRoot, 'runtime-state.json'),
+    JSON.stringify({ files: [path.join('data', 'stock_analysis.db')] }),
+    'utf-8'
+  );
+
+  const mainModule = loadMainModule(t, {
+    platform: 'win32',
+    app: {
+      isPackaged: true,
+      getPath: (name) => {
+        if (name === 'exe') {
+          return path.join(appDir, 'Daily Stock Analysis.exe');
+        }
+        return userDataDir;
+      },
+    },
+  });
+  const originalCopyFileSync = fs.copyFileSync;
+  let failedCopyAttempted = false;
+
+  fs.copyFileSync = (source, target) => {
+    if (source === backupDbPath) {
+      failedCopyAttempted = true;
+      throw new Error('target locked');
+    }
+    return originalCopyFileSync(source, target);
+  };
+
+  t.after(() => {
+    fs.copyFileSync = originalCopyFileSync;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  assert.doesNotThrow(() => {
+    mainModule.restorePackagedRuntimeStateFromBackup();
+  });
+  assert.equal(failedCopyAttempted, true);
+  assert.equal(fs.existsSync(backupRoot), false);
 });
 
 test('stopBackend waits for backend process exit', async (t) => {

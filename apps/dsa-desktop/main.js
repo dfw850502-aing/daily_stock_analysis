@@ -490,23 +490,34 @@ function restorePackagedRuntimeStateFromBackup() {
   const runtimeEntries = resolveRuntimeFileEntries(appDir);
   const relativeFiles = normalizeBackupFileList(manifest);
   const restored = [];
+  const failed = [];
 
-  relativeFiles.forEach((relativePath) => {
-    const entry = runtimeEntries.find((candidate) => candidate.relativePath === relativePath);
-    const source = path.join(backupRoot, relativePath);
-    const target = entry ? entry.absolutePath : path.join(appDir, relativePath);
-    if (!fs.existsSync(source)) {
-      return;
-    }
-    ensureDirectory(path.dirname(target));
-    fs.copyFileSync(source, target);
-    restored.push(relativePath);
-  });
-
-  cleanupUpdateBackupRoot();
+  try {
+    relativeFiles.forEach((relativePath) => {
+      try {
+        const entry = runtimeEntries.find((candidate) => candidate.relativePath === relativePath);
+        const source = path.join(backupRoot, relativePath);
+        const target = entry ? entry.absolutePath : path.join(appDir, relativePath);
+        if (!fs.existsSync(source)) {
+          return;
+        }
+        ensureDirectory(path.dirname(target));
+        fs.copyFileSync(source, target);
+        restored.push(relativePath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failed.push(`${relativePath} (${message})`);
+      }
+    });
+  } finally {
+    cleanupUpdateBackupRoot();
+  }
 
   if (restored.length) {
     console.log(`[update] restored runtime files from backup: ${restored.join(', ')}`);
+  }
+  if (failed.length) {
+    logLine(`[update] skipped runtime restore files after copy failure: ${failed.join(', ')}`);
   }
 }
 
@@ -1529,6 +1540,7 @@ module.exports = {
   fetchLatestReleaseJson,
   normalizeVersionString,
   parseSemver,
+  restorePackagedRuntimeStateFromBackup,
   sanitizeReleaseUrl,
   stopBackend,
   __setBackendProcessForTest,
