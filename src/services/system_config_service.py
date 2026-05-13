@@ -724,12 +724,10 @@ class SystemConfigService:
 
         try:
             import litellm
-            from src.agent.llm_adapter import LLMToolAdapter
+            from src.agent.llm_adapter import register_fallback_model_pricing
 
-            # Register custom model pricing for MiniMax models not in LiteLLM's built-in list
-            # This must be done before litellm.completion() to prevent cost calculation errors
-            # Reuses the registration logic from LLMToolAdapter to avoid code duplication
-            LLMToolAdapter._register_custom_model_pricing()
+            # Register fallback pricing for OpenAI-compatible models to prevent cost calculation errors
+            register_fallback_model_pricing([resolved_model])
 
             started_at = time.perf_counter()
             response = litellm.completion(**call_kwargs)
