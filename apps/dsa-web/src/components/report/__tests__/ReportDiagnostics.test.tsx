@@ -74,7 +74,9 @@ describe('ReportDiagnostics', () => {
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(diagnosticSummary.copyText);
     });
-    expect(screen.getByRole('button', { name: '已复制' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '已复制' })).toBeInTheDocument();
+    });
   });
 
   it('uses the provided summary without fetching history diagnostics', () => {
