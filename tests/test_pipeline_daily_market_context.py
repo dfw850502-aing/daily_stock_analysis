@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.analyzer import GeminiAnalyzer
 from src.core.pipeline import StockAnalysisPipeline
+from src.enums import ReportType
 from src.services.daily_market_context import DailyMarketContext
 
 
@@ -34,7 +38,9 @@ def test_pipeline_loads_daily_market_context_when_market_review_enabled() -> Non
         service = service_cls.return_value
         service.get_context.return_value = _market_context()
 
-        context = pipeline._load_daily_market_context("cn")
+        target_date = date(2026, 6, 6)
+
+        context = pipeline._load_daily_market_context("cn", target_date=target_date)
 
     assert context is not None
     service_cls.assert_called_once_with(db_manager=pipeline.db)
@@ -46,6 +52,116 @@ def test_pipeline_loads_daily_market_context_when_market_review_enabled() -> Non
         search_service=pipeline.search_service,
         force_refresh=False,
         allow_generate=True,
+        target_date=target_date,
+    )
+
+
+def test_pipeline_initializes_daily_market_context_service_once_across_threads() -> None:
+    pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+    pipeline.config = SimpleNamespace(market_review_enabled=True, report_language="zh")
+    pipeline.db = MagicMock()
+    pipeline.notifier = MagicMock()
+    pipeline.analyzer = MagicMock()
+    pipeline.search_service = MagicMock()
+
+    service = MagicMock()
+    service.get_context.return_value = _market_context()
+    worker_count = 8
+    start_barrier = threading.Barrier(worker_count)
+    constructor_entered = threading.Event()
+    release_constructor = threading.Event()
+
+    def _load() -> DailyMarketContext:
+        start_barrier.wait(timeout=2)
+        return pipeline._load_daily_market_context(
+            "cn",
+            target_date=date(2026, 6, 6),
+        )
+
+    def _create_service(*args, **kwargs):
+        constructor_entered.set()
+        release_constructor.wait(timeout=2)
+        return service
+
+    with patch("src.core.pipeline.DailyMarketContextService", side_effect=_create_service) as service_cls:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(_load) for _ in range(worker_count)]
+            assert constructor_entered.wait(timeout=2)
+            time.sleep(0.05)
+            release_constructor.set()
+            contexts = [future.result(timeout=2) for future in futures]
+
+    assert contexts == [_market_context()] * worker_count
+    service_cls.assert_called_once_with(db_manager=pipeline.db)
+    assert service.get_context.call_count == worker_count
+
+
+def test_pipeline_uses_market_phase_effective_date_for_daily_market_context() -> None:
+    pipeline = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+    phase_context = SimpleNamespace(
+        effective_daily_bar_date=date(2026, 3, 26),
+        to_dict=MagicMock(
+            return_value={
+                "market": "cn",
+                "phase": "intraday",
+                "market_local_time": "2026-03-27T10:00:00+08:00",
+                "session_date": "2026-03-27",
+                "effective_daily_bar_date": "2026-03-26",
+                "is_trading_day": True,
+                "is_market_open_now": True,
+                "is_partial_bar": True,
+                "minutes_to_open": None,
+                "minutes_to_close": 300,
+                "trigger_source": "system",
+                "analysis_intent": "auto",
+                "warnings": [],
+            }
+        ),
+    )
+    pipeline.config = SimpleNamespace(
+        enable_realtime_quote=False,
+        enable_chip_distribution=False,
+        market_review_enabled=True,
+        report_language="zh",
+        agent_mode=False,
+        save_context_snapshot=False,
+        report_integrity_enabled=False,
+        fundamental_stage_timeout_seconds=1,
+    )
+    pipeline.query_source = "system"
+    pipeline.analysis_phase = "auto"
+    pipeline.portfolio_context = None
+    pipeline.fetcher_manager = MagicMock()
+    pipeline.fetcher_manager.get_stock_name.return_value = "贵州茅台"
+    pipeline.fetcher_manager.get_chip_distribution.return_value = None
+    pipeline.fetcher_manager.get_fundamental_context.return_value = {}
+    pipeline.fetcher_manager.build_failed_fundamental_context.return_value = {}
+    pipeline.db = MagicMock()
+    pipeline.db.get_analysis_context.return_value = {
+        "code": "600519",
+        "stock_name": "贵州茅台",
+        "today": {},
+        "yesterday": {},
+    }
+    pipeline.trend_analyzer = MagicMock()
+    pipeline.analyzer = MagicMock()
+    pipeline.analyzer.analyze.return_value = MagicMock(success=True)
+    pipeline.search_service = MagicMock()
+    pipeline.search_service.is_available = False
+    pipeline.search_service.news_window_days = 3
+    pipeline._emit_progress = MagicMock()
+    pipeline._load_daily_market_context = MagicMock(return_value=_market_context())
+
+    with patch("src.core.pipeline.build_market_phase_context", return_value=phase_context):
+        pipeline.analyze_stock(
+            "600519",
+            ReportType.SIMPLE,
+            "q-effective-date",
+        )
+
+    pipeline._load_daily_market_context.assert_called_once_with(
+        "cn",
+        target_date=date(2026, 3, 26),
     )
 
 

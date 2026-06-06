@@ -86,6 +86,7 @@ logger = logging.getLogger(__name__)
 # 防御性 guard：当实例绕过 __init__（如测试中 __new__）构造时，
 # double-check 初始化 _single_stock_notify_lock 仍然线程安全。
 _SINGLE_STOCK_NOTIFY_LOCK_INIT_GUARD = threading.Lock()
+_DAILY_MARKET_CONTEXT_SERVICE_LOCK_INIT_GUARD = threading.Lock()
 
 
 class StockAnalysisPipeline:
@@ -141,6 +142,7 @@ class StockAnalysisPipeline:
         self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
         self.notifier = NotificationService(source_message=source_message)
         self._single_stock_notify_lock = threading.Lock()
+        self._daily_market_context_service_lock = threading.Lock()
         
         # 初始化搜索服务（可选，初始化失败不应阻断主分析流程）
         try:
@@ -314,7 +316,19 @@ class StockAnalysisPipeline:
             market_phase_context_dict = market_phase_context.to_dict()
             market_phase_summary = render_market_phase_summary(market_phase_context_dict)
             report_language = normalize_report_language(getattr(self.config, "report_language", "zh"))
-            daily_market_context = self._load_daily_market_context(market)
+            daily_market_target_date = self._coerce_daily_market_context_date(
+                getattr(market_phase_context, "effective_daily_bar_date", None)
+                or market_phase_context_dict.get("effective_daily_bar_date")
+            )
+            if daily_market_target_date is None:
+                daily_market_target_date = get_effective_trading_date(
+                    market,
+                    current_time=current_time,
+                )
+            daily_market_context = self._load_daily_market_context(
+                market,
+                target_date=daily_market_target_date,
+            )
 
             self._emit_progress(18, f"{code}：正在获取行情与筹码数据")
             # 获取股票名称（先走轻量名称路径，后续若 realtime_quote 有 name 再覆盖）
@@ -1293,6 +1307,7 @@ class StockAnalysisPipeline:
         market: str,
         *,
         force_refresh: bool = False,
+        target_date: Optional[date] = None,
     ) -> Optional[DailyMarketContext]:
         """Load/generate today's market context when market review is explicitly enabled."""
         if getattr(self.config, "market_review_enabled", None) is not True:
@@ -1301,8 +1316,12 @@ class StockAnalysisPipeline:
         try:
             service = getattr(self, "_daily_market_context_service", None)
             if service is None:
-                service = DailyMarketContextService(db_manager=self.db)
-                self._daily_market_context_service = service
+                service_lock = self._get_daily_market_context_service_lock()
+                with service_lock:
+                    service = getattr(self, "_daily_market_context_service", None)
+                    if service is None:
+                        service = DailyMarketContextService(db_manager=self.db)
+                        self._daily_market_context_service = service
             return service.get_context(
                 region=market,
                 config=self.config,
@@ -1311,10 +1330,35 @@ class StockAnalysisPipeline:
                 search_service=self.search_service,
                 force_refresh=force_refresh,
                 allow_generate=True,
+                target_date=target_date,
             )
         except Exception as exc:
             logger.warning("加载大盘环境上下文失败，个股分析继续: %s", exc, exc_info=True)
             return None
+
+    def _get_daily_market_context_service_lock(self) -> threading.Lock:
+        service_lock = getattr(self, "_daily_market_context_service_lock", None)
+        if service_lock is not None:
+            return service_lock
+        with _DAILY_MARKET_CONTEXT_SERVICE_LOCK_INIT_GUARD:
+            service_lock = getattr(self, "_daily_market_context_service_lock", None)
+            if service_lock is None:
+                service_lock = threading.Lock()
+                self._daily_market_context_service_lock = service_lock
+            return service_lock
+
+    @staticmethod
+    def _coerce_daily_market_context_date(value: Any) -> Optional[date]:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _attach_daily_market_context(

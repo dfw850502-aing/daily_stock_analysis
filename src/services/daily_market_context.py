@@ -90,10 +90,11 @@ class DailyMarketContextService:
         search_service: Any = None,
         force_refresh: bool = False,
         allow_generate: bool = True,
+        target_date: Optional[date] = None,
     ) -> Optional[DailyMarketContext]:
         normalized_region = _normalize_region(region)
-        target_date = self._today_fn()
-        cache_key = (target_date, normalized_region)
+        context_date = target_date or self._today_fn()
+        cache_key = (context_date, normalized_region)
 
         if not force_refresh:
             cached = self._cache.get(cache_key)
@@ -102,7 +103,7 @@ class DailyMarketContextService:
 
             history_context = self._load_same_day_history(
                 region=normalized_region,
-                target_date=target_date,
+                target_date=context_date,
             )
             if history_context is not None:
                 self._cache[cache_key] = history_context
@@ -118,7 +119,7 @@ class DailyMarketContextService:
                     return cached
                 history_context = self._load_same_day_history(
                     region=normalized_region,
-                    target_date=target_date,
+                    target_date=context_date,
                 )
                 if history_context is not None:
                     self._cache[cache_key] = history_context
@@ -126,7 +127,7 @@ class DailyMarketContextService:
 
             generated = self._run_market_review_context(
                 region=normalized_region,
-                target_date=target_date,
+                target_date=context_date,
                 config=config,
                 notifier=notifier,
                 analyzer=analyzer,
