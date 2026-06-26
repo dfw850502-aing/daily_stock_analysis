@@ -2,10 +2,6 @@ name: 每日股票分析
 
 on:
   # 定时触发 - 每天北京时间 7:30 (UTC 23:30)
-  schedule:
-    - cron: '30 23 * * 0-4'     # 周日至周四，UTC 23:30 = 北京时间 7:30 🕐
-  
-  # 手动触发
   workflow_dispatch:
     inputs:
       mode:
